@@ -1,0 +1,70 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  acrName: 'weatheracr001'
+  imageName: 'weatherapi'
+  aksResourceGroup: 'rg-weather'
+  aksClusterName: 'weather-aks'
+  containerRegistry: 'weatheracr001.azurecr.io'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: BuildAndPush
+  displayName: Build and Push Docker Image
+  jobs:
+  - job: Build
+    steps:
+    - task: Checkout@1
+      displayName: 'Checkout code'
+
+    - task: Docker@2
+      displayName: 'Build and push image to ACR'
+      inputs:
+        containerRegistry: '$(acrName)' # will set service connection below
+        repository: '$(imageName)'
+        command: 'buildAndPush'
+        Dockerfile: 'docker/Dockerfile'
+        buildContext: '.'
+        tags: |
+          $(Build.BuildId)
+
+- stage: DeployToAKS
+  displayName: Deploy to AKS
+  dependsOn: BuildAndPush
+  jobs:
+  - job: Deploy
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Login to AKS and deploy via kubectl'
+      inputs:
+        azureSubscription: 'azure-rg-weather-conn'   # service connection name
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Get AKS credentials
+          az aks get-credentials \
+            --resource-group $(aksResourceGroup) \
+            --name $(aksClusterName) \
+            --overwrite-existing
+
+          # Set image tag
+          IMAGE_TAG=$(Build.BuildId)
+          FULL_IMAGE=$(containerRegistry)/$(imageName):$IMAGE_TAG
+
+          echo "Using image: $FULL_IMAGE"
+
+          # Apply manifests with updated image using kubectl set image
+          kubectl set image deployment/weatherapi-deployment \
+            weatherapi=$FULL_IMAGE \
+            --namespace default || true
+
+          # If deployment does not exist yet, apply raw manifests:
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
